@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tp-test",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/Users/tim/Desktop/vda_v4/tp_test_server.py"],
+      "port": 8123
+    }
+  ]
+}

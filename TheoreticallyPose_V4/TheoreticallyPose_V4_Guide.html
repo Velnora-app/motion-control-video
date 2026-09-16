@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TheoreticallyPose V4 — Quick Guide</title>
+<style>
+  :root { --bg:#14161a; --panel:#1c1f26; --line:#2a2f3a; --text:#cfd6e4; --dim:#8b93a7; --accent:#7ecfff; --gold:#fac775; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.65 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1 { font-size: 26px; color: #fff; margin-bottom: 4px; }
+  h1 em { color: var(--accent); font-style: normal; }
+  .sub { color: var(--dim); margin-bottom: 28px; }
+  h2 { font-size: 18px; color: var(--gold); margin: 32px 0 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+  p { margin: 8px 0; }
+  ol, ul { margin: 8px 0 8px 22px; }
+  li { margin: 5px 0; }
+  strong { color: #fff; }
+  code, kbd { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px; font-size: 13px; color: var(--accent); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; margin: 12px 0; }
+  .tip { border-left: 3px solid var(--gold); }
+  .footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+  a { color: var(--accent); }
+  @media print { body { background: #fff; color: #222; }
+    :root { --panel:#f4f5f7; --line:#ddd; --text:#222; --dim:#666; --accent:#0b6aa8; --gold:#a4700d; }
+    h1, strong { color: #000; } .wrap { padding: 10px 0; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Theoretically<em>Pose</em> V4 — Quick Guide</h1>
+  <p class="sub">Turn any video clip into control videos for AI video generation</p>
+
+  <p>TheoreticallyPose converts a clip into <strong>pose skeletons, depth maps, and
+  silhouettes</strong> — the control videos you feed to video-to-video AI tools
+  (Seedance, Kling, Runway, and friends). Everything runs <strong>in your browser, on
+  your machine</strong>. Your video never gets uploaded anywhere.</p>
+
+  <h2>What you need</h2>
+  <ul>
+    <li><strong>Chrome or Edge</strong> on a reasonably modern computer (the depth engines use
+      your GPU via WebGPU — Safari and Firefox may only run the skeleton and silhouette parts)</li>
+    <li>A video clip — a few seconds is the sweet spot; mp4 works great
+      (a <code>sample_clip.mp4</code> is included to play with)</li>
+    <li>That's it. No account, no install, no subscription. It's one HTML file.</li>
+  </ul>
+
+  <h2>Quick start (60 seconds)</h2>
+  <ol>
+    <li><strong>Double-click <code>TheoreticallyPose_V4.html</code></strong> — it opens in your browser</li>
+    <li><strong>Drag your clip</strong> onto the left panel (or click to browse)</li>
+    <li>Hit <strong>Track</strong> — it finds the person and builds the skeleton (~30s for a short clip)</li>
+    <li>Hit <strong>Bake</strong> in the Depth panel — it computes a depth map for every frame</li>
+    <li><strong>Export MP4</strong> (or PNG sequence) — that's your control video. Feed it to your
+      AI video tool as the driving/reference video.</li>
+  </ol>
+  <div class="card">First time you Bake, the depth model downloads automatically (45–95&nbsp;MB
+  depending on engine, with a progress bar). It's cached after that — future bakes start
+  instantly.</div>
+
+  <h2>The layers (mix and match)</h2>
+  <p>Three stackable passes, each with its own on/off and opacity:</p>
+  <ul>
+    <li><strong>Skeleton</strong> — the pose stick figure. "OpenPose" colors are what most AI
+      models were trained on; use those unless you have a reason not to.</li>
+    <li><strong>Silhouette</strong> — solid body shapes from the video. "Tint" style colors each person.</li>
+    <li><strong>Depth</strong> — grayscale depth of the whole scene (bright = near, dark = far).</li>
+  </ul>
+  <p><strong>Presets</strong> are one-click mixes: <em>Stick figure</em>, <em>OpenPose</em>,
+  <strong>Full Stack</strong> (all three layers — the flagship look), <em>Silhouette</em>,
+  <em>Depth only</em>. Watch the status bar at the bottom — every preset click tells you
+  exactly what it switched.</p>
+
+  <h2>The two depth engines</h2>
+  <ul>
+    <li><strong>Fast (per-frame)</strong> — quick, but each frame is computed independently, so
+      depth can shimmer over time. The <em>stabilize</em> and <em>smooth</em> controls clean
+      most of that up.</li>
+    <li><strong>Consistent (VDA)</strong> — a temporal model that looks at 32 frames at once.
+      Depth comes out <strong>stable straight away</strong> — no flicker to fix — and it's
+      actually <em>faster</em> than Fast mode on most GPUs. Needs WebGPU (Chrome/Edge). If your
+      browser can't run it, the app tells you and Fast mode still works.</li>
+  </ul>
+  <div class="card tip">If your machine supports it, <strong>use Consistent.</strong>
+  It's the whole reason V4 exists.</div>
+
+  <h2>Multiple people</h2>
+  <ol>
+    <li>Tick <strong>Multiple characters</strong> and pick how many (2–5)</li>
+    <li>Hit <strong>Track</strong> again — changing the character count needs a re-track
+      (re-tracking replaces the previous track completely)</li>
+    <li>Each character gets a color — you'll see numbered skeletons in the overlay.
+      <strong>Click a character's color swatch to pick your own</strong> — it updates the
+      skeleton tints, tinted silhouettes, and colored depth everywhere at once</li>
+    <li>Bonus: in the Depth panel, tick <strong>color chars</strong> to tint each person's
+      region of the depth map with their character color (depth shading is preserved —
+      near people stay bright, far people stay dark)</li>
+  </ol>
+  <div class="card tip"><strong>Tip:</strong> multi-person tracking works best when people are
+  reasonably large in frame (roughly a third of the frame height or more). Tiny background
+  figures may not track.</div>
+
+  <h2>Working with a range</h2>
+  <p>Set <strong>In</strong> / <strong>Out</strong> points (<kbd>I</kbd> / <kbd>O</kbd> keys) to
+  work on just a section — tracking, baking, and exports all respect the range.
+  <strong>Full</strong> resets to the whole clip.</p>
+
+  <h2>Exporting</h2>
+  <ul>
+    <li><strong>Export MP4</strong> — the composited control video, ready for your AI tool</li>
+    <li><strong>PNG seq</strong> — a zip of lossless frames, for compositing or picky pipelines</li>
+    <li><strong>JSON</strong> — the raw pose keypoints, if you want to do something custom</li>
+  </ul>
+
+  <h2>If something's weird</h2>
+  <ul>
+    <li><strong>"Consistent engine needs WebGPU"</strong> — use Chrome or Edge, current version.
+      On an old GPU, use the Fast engine instead.</li>
+    <li><strong>Depth model won't download</strong> — check your internet; the models come from
+      HuggingFace on first use. After that it works offline.</li>
+    <li><strong>A person isn't tracking</strong> — they're probably too small in frame, or heavily
+      cut off. Try a tighter crop of the clip.</li>
+    <li><strong>Depth looks inverted</strong> (near is dark) — tick <strong>invert</strong> in the Depth panel.</li>
+    <li><strong>Changed character count and things look stale</strong> — just hit Track again.</li>
+  </ul>
+
+  <p class="footer">TheoreticallyPose by
+  <a href="https://www.youtube.com/@TheoreticallyMedia">Theoretically Media</a>.
+  Depth models: Depth Anything V2 + Video Depth Anything (Small, Apache-2.0) by ByteDance,
+  served from HuggingFace. Pose: MediaPipe. Everything processes locally in your browser.</p>
+</div>
+</body>
+</html>

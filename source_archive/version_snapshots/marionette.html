@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marionette — video-to-video control room</title>
+<style>
+  :root {
+    --bg: #121212; --panel: #1c1c1c; --panel2: #242424; --line: #333;
+    --text: #e8e8e8; --dim: #909090; --faint: #666;
+    --accent: #FAC775; --teal: #5DCAA5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; padding: 12px; gap: 10px;
+  }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  header .logo { font-size: 16px; font-weight: 600; letter-spacing: 0.3px; }
+  header .tag { color: var(--faint); font-size: 12px; }
+  #status { flex: 1; text-align: center; color: var(--dim); font-size: 12px; min-width: 120px; }
+  #status.err { color: #f09595; }
+  button, select, input[type=file] { font: inherit; }
+  button {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; white-space: nowrap;
+  }
+  button:hover:not(:disabled) { border-color: #555; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  button.primary { background: var(--accent); color: #1a1a1a; border-color: var(--accent); font-weight: 600; }
+  select {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 6px;
+  }
+  main { display: grid; grid-template-columns: 300px minmax(0,1fr) 250px; gap: 10px; flex: 1; min-height: 0; align-items: start; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  .panel h3 { font-size: 11px; font-weight: 600; color: var(--dim); text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 8px; }
+  .stage { display: flex; align-items: center; justify-content: center; }
+  .frame-wrap { position: relative; width: 100%; max-height: 56vh; margin: 0 auto; background: #000; border-radius: 6px; overflow: hidden; }
+  .frame-wrap video, .frame-wrap canvas.overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #comp { display: block; width: 100%; height: 100%; touch-action: none; }
+  .meta { color: var(--faint); font-size: 11px; margin-top: 6px; }
+  .empty-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 12px; text-align: center; padding: 20px; }
+  aside section { margin-bottom: 14px; }
+  .layer { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 6px; background: var(--panel2); }
+  .layer .row, .ctl .row { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .layer .head { display: flex; align-items: center; gap: 8px; margin-top: 0; }
+  .layer .head label { font-weight: 600; flex: 1; cursor: pointer; }
+  .row label.small, .small { color: var(--dim); font-size: 11px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); min-width: 0; }
+  input[type=checkbox], input[type=radio] { accent-color: var(--accent); }
+  .presets { display: flex; flex-wrap: wrap; gap: 5px; }
+  .presets button { padding: 3px 9px; font-size: 12px; }
+  .bar { height: 5px; background: #333; border-radius: 3px; overflow: hidden; flex: 1; }
+  .bar > div { height: 100%; width: 0%; background: var(--teal); }
+  footer { display: flex; align-items: center; gap: 10px; }
+  #timeline { flex: 1; height: 34px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; touch-action: none; }
+  #timeRead { color: var(--dim); font-size: 12px; min-width: 170px; text-align: right; font-variant-numeric: tabular-nums; }
+  #busy {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.72); display: none;
+    align-items: center; justify-content: center; z-index: 50;
+  }
+  #busy .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 22px 26px; width: 340px; }
+  #busy h4 { font-size: 14px; margin-bottom: 12px; }
+  #busy .sub { color: var(--dim); font-size: 12px; margin-top: 10px; min-height: 16px; }
+  #busy .bar { margin-top: 4px; height: 7px; }
+  #busy button { margin-top: 14px; }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; flex: 1; background: var(--panel2); }
+  .seg button.on { background: var(--accent); color: #1a1a1a; font-weight: 600; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">Marionette</span>
+  <span class="tag">video-to-video control room</span>
+  <button id="loadBtn" class="primary">Load video</button>
+  <input type="file" id="fileIn" accept="video/*" style="display:none">
+  <label class="small">fps <select id="fpsSel">
+    <option>23.976</option><option selected>24</option><option>25</option>
+    <option>29.97</option><option>30</option><option>50</option><option>59.94</option><option>60</option>
+  </select></label>
+  <span id="status">Loading pose model…</span>
+  <label class="small">export <select id="resSel">
+    <option value="source" selected>Source res</option>
+    <option value="1080">1080p</option>
+    <option value="720">720p</option>
+  </select></label>
+  <button id="expMp4" disabled>Export MP4</button>
+  <button id="expPng" disabled>PNG seq</button>
+  <button id="expJson" disabled>JSON</button>
+</header>
+
+<main>
+  <div class="panel">
+    <h3>Source</h3>
+    <div class="stage"><div class="frame-wrap" id="srcWrap" style="aspect-ratio:16/9">
+      <video id="vid" muted playsinline></video>
+      <canvas class="overlay" id="srcOverlay"></canvas>
+      <div class="empty-hint" id="srcHint">Load a clip to begin.<br>Everything runs locally in your browser.</div>
+    </div></div>
+    <div class="row" style="display:flex;align-items:center;gap:8px;margin-top:6px">
+      <label class="small" style="display:flex;align-items:center;gap:5px">
+        <input type="checkbox" id="ovlChk" checked> tracking overlay</label>
+      <span class="meta" id="srcMeta" style="margin:0;flex:1;text-align:right"></span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Control output</h3>
+    <div class="stage"><div class="frame-wrap" id="compWrap" style="aspect-ratio:16/9">
+      <canvas id="comp"></canvas>
+    </div></div>
+    <div class="meta" id="camHint">match source: framing locked to the original camera</div>
+  </div>
+
+  <aside class="panel">
+    <section>
+      <h3>Layers</h3>
+      <div class="layer">
+        <div class="head"><input type="checkbox" id="skelOn" checked><label for="skelOn">Skeleton</label>
+          <select id="skelStyle" style="font-size:11px"><option value="openpose">OpenPose colors</option><option value="white">White</option></select></div>
+        <div class="row"><label class="small" style="width:52px">opacity</label><input type="range" id="skelOp" min="0" max="1" step="0.05" value="1"></div>
+        <div class="row"><label class="small" style="width:52px">bones</label><input type="range" id="boneW" min="1" max="14" step="0.5" value="5">
+          <label class="small" style="width:34px">joints</label><input type="range" id="jointW" min="0" max="14" step="0.5" value="6"></div>
+      </div>
+      <div class="layer">
+        <div class="head"><input type="checkbox" id="silOn"><label for="silOn">Silhouette</label></div>
+        <div class="row"><label class="small" style="width:52px">opacity</label><input type="range" id="silOp" min="0" max="1" step="0.05" value="0.45"></div>
+      </div>
+      <div class="layer">
+        <div class="head"><input type="checkbox" id="depthOn"><label for="depthOn">Depth</label>
+          <button id="bakeBtn" disabled style="font-size:11px;padding:2px 8px">Bake depth</button></div>
+        <div class="row"><label class="small" style="width:52px">opacity</label><input type="range" id="depthOp" min="0" max="1" step="0.05" value="1"></div>
+        <div class="row"><div class="bar"><div id="bakeBar"></div></div></div>
+        <div class="row"><span class="small" id="bakeInfo">not baked</span></div>
+      </div>
+    </section>
+    <section>
+      <h3>Presets</h3>
+      <div class="presets">
+        <button data-preset="stick">Stick figure</button>
+        <button data-preset="openpose">OpenPose</button>
+        <button data-preset="tweet">Tweet look</button>
+        <button data-preset="sil">Silhouette</button>
+        <button data-preset="depth">Depth only</button>
+      </div>
+    </section>
+    <section class="ctl">
+      <h3>Tracking</h3>
+      <div class="row"><label class="small" style="width:70px">smoothing</label><input type="range" id="smooth" min="0" max="0.92" step="0.02" value="0.5"></div>
+      <div class="row"><label class="small" style="width:70px">confidence</label><input type="range" id="conf" min="0" max="0.95" step="0.05" value="0.5"></div>
+      <div class="row"><button id="retrackBtn" disabled style="font-size:11px">Re-track motion</button></div>
+    </section>
+    <section>
+      <h3>Camera</h3>
+      <div class="seg"><button id="camMatch" class="on">Match source</button><button id="camFree">Free orbit</button></div>
+      <div class="row" style="display:flex;margin-top:6px"><button id="camReset" style="font-size:11px">Reset view</button>
+        <span class="small" style="margin-left:8px">orbit affects the skeleton layer</span></div>
+    </section>
+  </aside>
+</main>
+
+<footer>
+  <button id="playBtn" disabled>Play</button>
+  <canvas id="timeline"></canvas>
+  <span id="timeRead">0:00.00 / 0:00.00 · frame 0 / 0</span>
+</footer>
+
+<div id="busy"><div class="card">
+  <h4 id="busyTitle">Working…</h4>
+  <div class="bar"><div id="busyBar"></div></div>
+  <div class="sub" id="busySub"></div>
+  <button id="busyCancel">Cancel</button>
+</div></div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const $ = id => document.getElementById(id);
+const vid = $('vid'), comp = $('comp'), srcOverlay = $('srcOverlay'), timeline = $('timeline');
+const compCtx = comp.getContext('2d');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+
+const state = {
+  fps: 24, duration: 0, frameCount: 0, vw: 0, vh: 0,
+  tracked: false, raw: [], frames: [],
+  segTs: 0, busy: false, cancelFlag: false,
+  smoothing: 0.5, conf: 0.5, camMode: 'match',
+  layers: {
+    skel: { on: true, opacity: 1, style: 'openpose', bone: 5, joint: 6 },
+    sil:  { on: false, opacity: 0.45 },
+    depth:{ on: false, opacity: 1 },
+  },
+  depth: { frames: [], w: 0, h: 0, gmin: 0, gmax: 1, bakedCount: 0, backend: null },
+};
+window.__marionette = state;
+
+function status(msg, isErr) {
+  const el = $('status');
+  el.textContent = msg;
+  el.className = isErr ? 'err' : '';
+  if (isErr) console.error('[marionette]', msg); else console.log('[marionette]', msg);
+}
+window.addEventListener('error', e => status('Error: ' + (e.message || e.type), true));
+window.addEventListener('unhandledrejection', e => status('Error: ' + (e.reason?.message || e.reason), true));
+
+/* ---------------- pose model ---------------- */
+let landmarker = null;
+async function initPose() {
+  const mp = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/+esm');
+  const vision = await mp.FilesetResolver.forVisionTasks(
+    'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+  const opts = delegate => ({
+    baseOptions: {
+      modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task',
+      delegate,
+    },
+    runningMode: 'VIDEO', numPoses: 1, outputSegmentationMasks: true,
+    minPoseDetectionConfidence: 0.5, minTrackingConfidence: 0.5,
+  });
+  try { landmarker = await mp.PoseLandmarker.createFromOptions(vision, opts('GPU')); }
+  catch (e) {
+    console.warn('GPU delegate failed, falling back to CPU', e);
+    landmarker = await mp.PoseLandmarker.createFromOptions(vision, opts('CPU'));
+  }
+  status('Pose model ready — load a clip.');
+}
+const poseReady = initPose().catch(e => status('Pose model failed to load: ' + e.message, true));
+const nextTs = () => (state.segTs += 33.34);
+
+/* ---------------- three.js skeleton ---------------- */
+const OP_COLORS = [
+  [255,0,0],[255,85,0],[255,170,0],[255,255,0],[170,255,0],[85,255,0],
+  [0,255,0],[0,255,85],[0,255,170],[0,255,255],[0,170,255],[0,85,255],
+  [0,0,255],[85,0,255],[170,0,255],[255,0,255],[255,0,170],[255,0,85]];
+const LIMBS = [ [1,2],[1,5],[2,3],[3,4],[5,6],[6,7],[1,8],[8,9],[9,10],
+  [1,11],[11,12],[12,13],[1,0],[0,14],[14,16],[0,15],[15,17] ];
+const COCO2MP = { 0:0, 2:12, 3:14, 4:16, 5:11, 6:13, 7:15, 8:24, 9:26, 10:28,
+  11:23, 12:25, 13:27, 14:5, 15:2, 16:8, 17:7 };
+
+const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true, preserveDrawingBuffer: true });
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+let A = 16 / 9;
+const orthoCam = new THREE.OrthographicCamera(-A/2, A/2, 0.5, -0.5, 0.01, 20);
+orthoCam.position.set(0, 0, 3);
+const perspCam = new THREE.PerspectiveCamera(40, A, 0.01, 50);
+perspCam.position.set(0, 0, 1.6);
+const controls = new OrbitControls(perspCam, comp);
+controls.enableDamping = true; controls.dampingFactor = 0.12;
+controls.enabled = false;
+
+const rgb = c => new THREE.Color(c[0]/255, c[1]/255, c[2]/255);
+const matsColor = OP_COLORS.map(c => new THREE.MeshBasicMaterial({ color: rgb(c) }));
+const matWhite = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const boneGeo = new THREE.CylinderGeometry(1, 1, 1, 10);
+const jointGeo = new THREE.SphereGeometry(1, 14, 10);
+const boneMeshes = LIMBS.map((L, i) => {
+  const m = new THREE.Mesh(boneGeo, matsColor[i % OP_COLORS.length]);
+  m.visible = false; scene.add(m); return m;
+});
+const jointMeshes = Array.from({ length: 18 }, (_, i) => {
+  const m = new THREE.Mesh(jointGeo, matsColor[i]);
+  m.visible = false; scene.add(m); return m;
+});
+const UP = new THREE.Vector3(0, 1, 0);
+
+function cocoJoints(f) {
+  const out = [];
+  for (let i = 0; i < 18; i++) {
+    if (i === 1) {
+      const l = f.lm[11], r = f.lm[12];
+      out.push({ x: (l[0]+r[0])/2, y: (l[1]+r[1])/2, z: (l[2]+r[2])/2, vis: Math.min(l[3], r[3]) });
+    } else {
+      const p = f.lm[COCO2MP[i]];
+      out.push({ x: p[0], y: p[1], z: p[2], vis: p[3] });
+    }
+  }
+  return out;
+}
+const toWorld = j => new THREE.Vector3((j.x - 0.5) * A, 0.5 - j.y, -j.z * A * 0.6);
+
+function update3D(fi, targetH) {
+  const L = state.layers.skel;
+  const f = state.frames[fi];
+  const show = L.on && state.tracked && f;
+  if (!show) { boneMeshes.forEach(m => m.visible = false); jointMeshes.forEach(m => m.visible = false); return; }
+  const joints = cocoJoints(f);
+  const pos = joints.map(toWorld);
+  const rBone = Math.max(0.25, L.bone) / targetH * 0.5;
+  const rJoint = L.joint / targetH * 0.7;
+  const white = L.style === 'white';
+  for (let i = 0; i < 18; i++) {
+    const ok = joints[i].vis >= state.conf;
+    const m = jointMeshes[i];
+    m.visible = ok && rJoint > 0.0001;
+    if (m.visible) {
+      m.position.copy(pos[i]);
+      m.scale.setScalar(rJoint);
+      m.material = white ? matWhite : matsColor[i];
+    }
+  }
+  const dir = new THREE.Vector3();
+  LIMBS.forEach((Lb, bi) => {
+    const [a, b] = Lb;
+    const ok = joints[a].vis >= state.conf && joints[b].vis >= state.conf;
+    const m = boneMeshes[bi];
+    m.visible = ok;
+    if (!ok) return;
+    dir.subVectors(pos[b], pos[a]);
+    const len = dir.length();
+    m.visible = len > 1e-5;
+    if (!m.visible) return;
+    m.position.copy(pos[a]).addScaledVector(dir, 0.5);
+    m.quaternion.setFromUnitVectors(UP, dir.normalize());
+    m.scale.set(rBone, len, rBone);
+    m.material = white ? matWhite : matsColor[bi % OP_COLORS.length];
+  });
+}
+
+/* ---------------- caches ---------------- */
+const maskCanvas = document.createElement('canvas');
+const maskCtx = maskCanvas.getContext('2d');
+let maskCacheFrame = -1;
+function getMaskCanvas(fi) {
+  if (maskCacheFrame === fi) return maskCanvas;
+  if (!landmarker || vid.readyState < 2) return null;
+  const res = landmarker.detectForVideo(vid, nextTs());
+  const mk = res.segmentationMasks && res.segmentationMasks[0];
+  if (!mk) return null;
+  try {
+    const mw = mk.width, mh = mk.height;
+    const data = mk.getAsFloat32Array();
+    if (maskCanvas.width !== mw) { maskCanvas.width = mw; maskCanvas.height = mh; }
+    const img = maskCtx.createImageData(mw, mh);
+    const px = img.data;
+    for (let i = 0; i < data.length; i++) {
+      const v = data[i];
+      let a = (v - 0.3) / 0.4;
+      a = a <= 0 ? 0 : a >= 1 ? 1 : a * a * (3 - 2 * a);
+      const o = i * 4;
+      px[o] = 235; px[o+1] = 235; px[o+2] = 235; px[o+3] = a * 255;
+    }
+    maskCtx.putImageData(img, 0, 0);
+    maskCacheFrame = fi;
+    return maskCanvas;
+  } finally {
+    res.segmentationMasks.forEach(m => m.close());
+  }
+}
+
+const depthCanvas = document.createElement('canvas');
+const depthCtx = depthCanvas.getContext('2d');
+let depthCacheFrame = -1;
+function getDepthCanvas(fi) {
+  const D = state.depth;
+  if (fi >= D.bakedCount || !D.frames[fi]) return null;
+  if (depthCacheFrame === fi) return depthCanvas;
+  const f = D.frames[fi];
+  if (depthCanvas.width !== D.w) { depthCanvas.width = D.w; depthCanvas.height = D.h; }
+  const img = depthCtx.createImageData(D.w, D.h);
+  const px = img.data, span = f.max - f.min || 1, gspan = D.gmax - D.gmin || 1;
+  for (let i = 0; i < f.u8.length; i++) {
+    const raw = f.min + (f.u8[i] / 255) * span;
+    const g = clamp((raw - D.gmin) / gspan, 0, 1) * 255;
+    const o = i * 4;
+    px[o] = g; px[o+1] = g; px[o+2] = g; px[o+3] = 255;
+  }
+  depthCtx.putImageData(img, 0, 0);
+  depthCacheFrame = fi;
+  return depthCanvas;
+}
+function invalidateCaches() { maskCacheFrame = -1; depthCacheFrame = -1; }
+
+/* ---------------- composite ---------------- */
+function drawComposite(ctx, fi, w, h) {
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+  const Ld = state.layers.depth, Ls = state.layers.sil, Lk = state.layers.skel;
+  if (Ld.on) {
+    const dc = getDepthCanvas(fi);
+    if (dc) { ctx.globalAlpha = Ld.opacity; ctx.drawImage(dc, 0, 0, w, h); }
+  }
+  if (Ls.on && state.tracked) {
+    const mc = getMaskCanvas(fi);
+    if (mc) { ctx.globalAlpha = Ls.opacity; ctx.drawImage(mc, 0, 0, w, h); }
+  }
+  if (Lk.on) {
+    update3D(fi, h);
+    if (renderer.domElement.width !== w || renderer.domElement.height !== h) renderer.setSize(w, h, false);
+    const cam = state.camMode === 'free' ? perspCam : orthoCam;
+    renderer.render(scene, cam);
+    ctx.globalAlpha = Lk.opacity;
+    ctx.drawImage(renderer.domElement, 0, 0, w, h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------- source overlay ---------------- */
+const ovlCtx = srcOverlay.getContext('2d');
+function drawSourceOverlay(fi) {
+  const w = srcOverlay.clientWidth * devicePixelRatio, h = srcOverlay.clientHeight * devicePixelRatio;
+  if (w === 0) return;
+  if (srcOverlay.width !== w) { srcOverlay.width = w; srcOverlay.height = h; }
+  ovlCtx.clearRect(0, 0, w, h);
+  if (!$('ovlChk').checked || !state.tracked) return;
+  const f = state.frames[fi];
+  if (!f) return;
+  const joints = cocoJoints(f);
+  ovlCtx.strokeStyle = 'rgba(250,199,117,0.95)';
+  ovlCtx.lineWidth = Math.max(1.2, h / 300);
+  ovlCtx.lineCap = 'round';
+  for (const [a, b] of LIMBS) {
+    if (joints[a].vis < state.conf || joints[b].vis < state.conf) continue;
+    ovlCtx.beginPath();
+    ovlCtx.moveTo(joints[a].x * w, joints[a].y * h);
+    ovlCtx.lineTo(joints[b].x * w, joints[b].y * h);
+    ovlCtx.stroke();
+  }
+  ovlCtx.fillStyle = 'rgba(255,255,255,0.9)';
+  for (const j of joints) {
+    if (j.vis < state.conf) continue;
+    ovlCtx.beginPath();
+    ovlCtx.arc(j.x * w, j.y * h, Math.max(1.5, h / 240), 0, 7);
+    ovlCtx.fill();
+  }
+}
+
+/* ---------------- timeline ---------------- */
+const tlCtx = timeline.getContext('2d');
+function drawTimeline(fi) {
+  const w = timeline.clientWidth * devicePixelRatio, h = timeline.clientHeight * devicePixelRatio;
+  if (w === 0) return;
+  if (timeline.width !== w) { timeline.width = w; timeline.height = h; }
+  tlCtx.clearRect(0, 0, w, h);
+  if (!state.frameCount) return;
+  const frac = state.duration ? vid.currentTime / state.duration : 0;
+  tlCtx.fillStyle = '#3a3a3a';
+  tlCtx.fillRect(0, h * 0.35, w, h * 0.3);
+  tlCtx.fillStyle = 'rgba(250,199,117,0.55)';
+  tlCtx.fillRect(0, h * 0.35, w * frac, h * 0.3);
+  if (state.depth.bakedCount > 0) {
+    tlCtx.fillStyle = '#5DCAA5';
+    tlCtx.fillRect(0, h - 4 * devicePixelRatio, w * (state.depth.bakedCount / state.frameCount), 3 * devicePixelRatio);
+  }
+  tlCtx.fillStyle = '#fff';
+  tlCtx.fillRect(w * frac - 1, h * 0.15, 2 * devicePixelRatio, h * 0.7);
+}
+function fmtTime(t) {
+  const m = Math.floor(t / 60), s = (t % 60).toFixed(2).padStart(5, '0');
+  return `${m}:${s}`;
+}
+
+/* ---------------- render loop ---------------- */
+const frameIndexNow = () =>
+  clamp(Math.round(vid.currentTime * state.fps - 1e-4), 0, Math.max(0, state.frameCount - 1));
+
+function tick() {
+  requestAnimationFrame(tick);
+  if (controls.enabled) controls.update();
+  if (!state.vw || state.busy) return;
+  const fi = frameIndexNow();
+  const w = comp.clientWidth * devicePixelRatio, h = comp.clientHeight * devicePixelRatio;
+  if (w > 0) {
+    if (comp.width !== Math.round(w)) { comp.width = Math.round(w); comp.height = Math.round(h); }
+    drawComposite(compCtx, fi, comp.width, comp.height);
+  }
+  drawSourceOverlay(fi);
+  drawTimeline(fi);
+  $('timeRead').textContent =
+    `${fmtTime(vid.currentTime)} / ${fmtTime(state.duration)} · frame ${fi + 1} / ${state.frameCount}`;
+}
+requestAnimationFrame(tick);
+
+/* ---------------- seeking ---------------- */
+function seekTo(t) {
+  return new Promise(resolve => {
+    t = clamp(t, 0, Math.max(0, state.duration - 0.001));
+    if (Math.abs(vid.currentTime - t) < 1e-5) return resolve();
+    let done = false;
+    const finish = () => { if (!done) { done = true; vid.removeEventListener('seeked', finish); resolve(); } };
+    vid.addEventListener('seeked', finish);
+    setTimeout(finish, 2000);
+    vid.currentTime = t;
+  });
+}
+const frameTime = i => (i + 0.5) / state.fps;
+
+/* ---------------- busy overlay ---------------- */
+function busyShow(title, cancellable = true) {
+  state.busy = true; state.cancelFlag = false;
+  $('busyTitle').textContent = title;
+  $('busyBar').style.width = '0%';
+  $('busySub').textContent = '';
+  $('busyCancel').style.display = cancellable ? '' : 'none';
+  $('busy').style.display = 'flex';
+}
+function busyProgress(frac, sub) {
+  $('busyBar').style.width = (frac * 100).toFixed(1) + '%';
+  if (sub != null) $('busySub').textContent = sub;
+}
+function busyHide() { state.busy = false; $('busy').style.display = 'none'; }
+$('busyCancel').onclick = () => { state.cancelFlag = true; };
+
+/* ---------------- tracking ---------------- */
+async function trackMotion() {
+  await poseReady;
+  if (!landmarker || !state.vw) return;
+  vid.pause(); syncPlayBtn();
+  busyShow('Tracking motion');
+  state.tracked = false; state.raw = [];
+  const N = state.frameCount;
+  const t0 = performance.now();
+  for (let i = 0; i < N; i++) {
+    if (state.cancelFlag) break;
+    await seekTo(frameTime(i));
+    let f = null;
+    try {
+      const res = landmarker.detectForVideo(vid, nextTs());
+      if (res.segmentationMasks) res.segmentationMasks.forEach(m => m.close());
+      if (res.landmarks && res.landmarks[0]) {
+        f = {
+          lm: res.landmarks[0].map(p => [p.x, p.y, p.z, p.visibility ?? 1]),
+          wl: res.worldLandmarks[0].map(p => [p.x, p.y, p.z]),
+        };
+      }
+    } catch (e) { console.warn('detect failed at frame', i, e); }
+    state.raw.push(f);
+    if (i % 4 === 0 || i === N - 1) {
+      const el = (performance.now() - t0) / 1000;
+      busyProgress((i + 1) / N, `frame ${i + 1} / ${N} · ${(el / (i + 1) * (N - i - 1)).toFixed(0)}s left`);
+    }
+  }
+  const found = state.raw.filter(Boolean).length;
+  applySmoothing();
+  state.tracked = state.raw.length > 0;
+  invalidateCaches();
+  busyHide();
+  await seekTo(0.0001);
+  const setEn = b => ['expMp4','expPng','expJson','retrackBtn','bakeBtn','playBtn'].forEach(id => $(id).disabled = !b);
+  setEn(true);
+  status(found ? `Tracked ${found}/${state.raw.length} frames with a person detected.`
+               : 'Tracking finished but no person was detected.', !found);
+}
+
+function applySmoothing() {
+  const s = state.smoothing, N = state.raw.length;
+  state.frames = state.raw.map(f => f && { lm: f.lm.map(p => p.slice()), wl: f.wl.map(p => p.slice()) });
+  if (s <= 0) return;
+  const passes = [[0, N, 1], [N - 1, -1, -1]];
+  for (const [start, end, step] of passes) {
+    let prev = null;
+    for (let i = start; i !== end; i += step) {
+      const f = state.frames[i];
+      if (!f) { prev = null; continue; }
+      if (prev) {
+        for (let j = 0; j < f.lm.length; j++) {
+          for (let k = 0; k < 3; k++) {
+            f.lm[j][k] = prev.lm[j][k] * s + f.lm[j][k] * (1 - s);
+            f.wl[j][k] = prev.wl[j][k] * s + f.wl[j][k] * (1 - s);
+          }
+        }
+      }
+      prev = f;
+    }
+  }
+}
+
+/* ---------------- depth bake ---------------- */
+let depthPipe = null;
+let RawImageC = null;
+async function getDepthPipe() {
+  if (depthPipe) return depthPipe;
+  status('Loading depth model…');
+  let T = null;
+  const urls = [
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1',
+    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.3.1/dist/transformers.min.js',
+  ];
+  for (const u of urls) { try { T = await import(u); break; } catch (e) { console.warn('import failed', u, e); } }
+  if (!T) throw new Error('could not load transformers.js');
+  T.env.allowLocalModels = false;
+  RawImageC = T.RawImage;
+  const progress_callback = p => {
+    if (p.status === 'progress' && p.total) busyProgress((p.loaded / p.total) * 0.999, `downloading depth model · ${(p.loaded/1048576).toFixed(0)} / ${(p.total/1048576).toFixed(0)} MB`);
+  };
+  const model = 'onnx-community/depth-anything-v2-small';
+  const hasGpu = !!navigator.gpu && !!(await navigator.gpu.requestAdapter?.().catch(() => null));
+  try {
+    if (!hasGpu) throw new Error('no webgpu');
+    depthPipe = await T.pipeline('depth-estimation', model, { device: 'webgpu', progress_callback });
+    state.depth.backend = 'WebGPU';
+  } catch (e) {
+    console.warn('webgpu depth failed, using wasm', e);
+    depthPipe = await T.pipeline('depth-estimation', model, { device: 'wasm', progress_callback });
+    state.depth.backend = 'WASM (slow)';
+  }
+  return depthPipe;
+}
+
+const workCanvas = document.createElement('canvas');
+async function bakeDepth() {
+  if (!state.vw) return;
+  vid.pause(); syncPlayBtn();
+  busyShow('Baking depth');
+  let pipe;
+  try { pipe = await getDepthPipe(); }
+  catch (e) { busyHide(); status('Depth model failed: ' + e.message, true); return; }
+  const D = state.depth;
+  D.frames = []; D.bakedCount = 0; depthCacheFrame = -1;
+  const dw = Math.min(518, state.vw) & ~1;
+  const dh = Math.round(state.vh * dw / state.vw) & ~1;
+  workCanvas.width = dw; workCanvas.height = dh;
+  const wctx = workCanvas.getContext('2d');
+  const N = state.frameCount;
+  const t0 = performance.now();
+  for (let i = 0; i < N; i++) {
+    if (state.cancelFlag) break;
+    await seekTo(frameTime(i));
+    wctx.drawImage(vid, 0, 0, dw, dh);
+    const blob = await new Promise(r => workCanvas.toBlob(r, 'image/png'));
+    const img = await RawImageC.fromBlob(blob);
+    const out = await pipe(img);
+    const t = out.predicted_depth;
+    const data = t.data, dims = t.dims;
+    const th = dims[dims.length - 2], tw = dims[dims.length - 1];
+    let mn = Infinity, mx = -Infinity;
+    for (let k = 0; k < data.length; k++) { const v = data[k]; if (v < mn) mn = v; if (v > mx) mx = v; }
+    const span = mx - mn || 1;
+    const u8 = new Uint8Array(data.length);
+    for (let k = 0; k < data.length; k++) u8[k] = ((data[k] - mn) / span) * 255;
+    D.frames.push({ u8, min: mn, max: mx });
+    D.w = tw; D.h = th;
+    D.bakedCount = i + 1;
+    const el = (performance.now() - t0) / 1000;
+    busyProgress((i + 1) / N, `frame ${i + 1} / ${N} · ${D.backend} · ${(el / (i + 1) * (N - i - 1)).toFixed(0)}s left`);
+  }
+  D.gmin = Math.min(...D.frames.map(f => f.min));
+  D.gmax = Math.max(...D.frames.map(f => f.max));
+  depthCacheFrame = -1;
+  busyHide();
+  const full = D.bakedCount === N;
+  $('bakeInfo').textContent = `${D.bakedCount}/${N} frames baked · ${D.backend}`;
+  $('bakeBar').style.width = (D.bakedCount / N * 100) + '%';
+  if (D.bakedCount && !state.layers.depth.on) { state.layers.depth.on = true; $('depthOn').checked = true; }
+  status(full ? 'Depth baked.' : 'Depth bake cancelled — partial bake kept.');
+  await seekTo(0.0001);
+}
+$('bakeBtn').onclick = bakeDepth;
+
+/* ---------------- export ---------------- */
+function exportDims() {
+  const sel = $('resSel').value;
+  let w = state.vw, h = state.vh;
+  if (sel !== 'source') {
+    const target = +sel;
+    const scale = target / Math.min(w, h);
+    if (scale < 1) { w = Math.round(w * scale); h = Math.round(h * scale); }
+  }
+  return [w & ~1, h & ~1];
+}
+const expCanvas = document.createElement('canvas');
+
+async function exportFrames(onFrame, title) {
+  const wasT = vid.currentTime;
+  vid.pause(); syncPlayBtn();
+  busyShow(title);
+  const N = state.frameCount;
+  const [w, h] = exportDims();
+  expCanvas.width = w; expCanvas.height = h;
+  const ectx = expCanvas.getContext('2d');
+  const liveW = renderer.domElement.width, liveH = renderer.domElement.height;
+  renderer.setSize(w, h, false);
+  let ok = true;
+  const t0 = performance.now();
+  try {
+    for (let i = 0; i < N; i++) {
+      if (state.cancelFlag) { ok = false; break; }
+      await seekTo(frameTime(i));
+      maskCacheFrame = -1; depthCacheFrame = -1;
+      drawComposite(ectx, i, w, h);
+      await onFrame(expCanvas, i, w, h);
+      const el = (performance.now() - t0) / 1000;
+      busyProgress((i + 1) / N, `frame ${i + 1} / ${N} · ${(el / (i + 1) * (N - i - 1)).toFixed(0)}s left`);
+    }
+  } finally {
+    renderer.setSize(liveW || 2, liveH || 2, false);
+    invalidateCaches();
+    busyHide();
+    await seekTo(wasT);
+  }
+  return ok;
+}
+
+function download(blob, name) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+}
+
+async function exportMP4() {
+  if (!('VideoEncoder' in window)) {
+    status('MP4 export needs WebCodecs — use Chrome or Edge.', true);
+    return;
+  }
+  let Mux;
+  try { Mux = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.5/+esm'); }
+  catch { Mux = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@4.3.5/+esm'); }
+  const [w, h] = exportDims();
+  const fps = state.fps;
+  const candidates = ['avc1.640033', 'avc1.640028', 'avc1.4d0028', 'avc1.42e01f'];
+  let codec = null;
+  for (const c of candidates) {
+    try {
+      const sup = await VideoEncoder.isConfigSupported({ codec: c, width: w, height: h, framerate: fps });
+      if (sup.supported) { codec = c; break; }
+    } catch {}
+  }
+  if (!codec) { status('No supported H.264 encoder config found.', true); return; }
+  const target = new Mux.ArrayBufferTarget();
+  const muxer = new Mux.Muxer({
+    target,
+    video: { codec: 'avc', width: w, height: h, frameRate: Math.max(1, Math.round(fps)) },
+    fastStart: 'in-memory',
+  });
+  let encErr = null;
+  const encoder = new VideoEncoder({
+    output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+    error: e => { encErr = e; },
+  });
+  encoder.configure({
+    codec, width: w, height: h, framerate: fps,
+    bitrate: Math.round(clamp(w * h * fps * 0.15, 4e6, 25e6)),
+    latencyMode: 'quality',
+  });
+  const keyInt = Math.max(1, Math.round(fps * 2));
+  const ok = await exportFrames(async (cnv, i) => {
+    if (encErr) throw encErr;
+    const vf = new VideoFrame(cnv, {
+      timestamp: Math.round(i * 1e6 / state.fps),
+      duration: Math.round(1e6 / state.fps),
+    });
+    encoder.encode(vf, { keyFrame: i % keyInt === 0 });
+    vf.close();
+    while (encoder.encodeQueueSize > 6) await sleep(10);
+  }, 'Exporting MP4');
+  if (!ok || encErr) {
+    try { encoder.close(); } catch {}
+    status(encErr ? 'Encoder error: ' + encErr.message : 'Export cancelled.', !!encErr);
+    return;
+  }
+  await encoder.flush();
+  encoder.close();
+  muxer.finalize();
+  download(new Blob([target.buffer], { type: 'video/mp4' }), 'marionette_control.mp4');
+  status(`Exported marionette_control.mp4 · ${w}×${h} @ ${state.fps} fps`);
+}
+
+async function exportPNG() {
+  const { zipSync } = await import('https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm');
+  const files = {};
+  const ok = await exportFrames(async (cnv, i) => {
+    const blob = await new Promise(r => cnv.toBlob(r, 'image/png'));
+    files[`frames/frame_${String(i).padStart(4, '0')}.png`] = new Uint8Array(await blob.arrayBuffer());
+  }, 'Exporting PNG sequence');
+  if (!ok) { status('Export cancelled.'); return; }
+  status('Zipping…');
+  const zipped = zipSync(files, { level: 0 });
+  download(new Blob([zipped], { type: 'application/zip' }), 'marionette_frames.zip');
+  status(`Exported ${Object.keys(files).length} PNG frames.`);
+}
+
+function exportJSON() {
+  const out = {
+    app: 'marionette', version: 1,
+    source: { width: state.vw, height: state.vh, fps: state.fps, frames: state.frameCount },
+    model: 'mediapipe_pose_landmarker_full',
+    smoothing: state.smoothing,
+    note: 'lm = normalized [x,y,z,visibility] per 33 MediaPipe landmarks; wl = world meters [x,y,z] hip-origin',
+    frames: state.frames.map((f, i) => f ? { i, lm: f.lm, wl: f.wl } : { i, lm: null, wl: null }),
+  };
+  download(new Blob([JSON.stringify(out)], { type: 'application/json' }), 'marionette_pose.json');
+  status('Exported keypoint JSON.');
+}
+$('expMp4').onclick = () => exportMP4().catch(e => { busyHide(); status('Export failed: ' + e.message, true); });
+$('expPng').onclick = () => exportPNG().catch(e => { busyHide(); status('Export failed: ' + e.message, true); });
+$('expJson').onclick = exportJSON;
+
+/* ---------------- fps estimate ---------------- */
+async function estimateFps() {
+  if (!vid.requestVideoFrameCallback) return null;
+  return new Promise(resolve => {
+    const deltas = [];
+    let last = null, settled = false;
+    const finish = val => {
+      if (settled) return;
+      settled = true;
+      vid.pause();
+      resolve(val);
+    };
+    const compute = () => {
+      deltas.sort((a, b) => a - b);
+      const med = deltas[Math.floor(deltas.length / 2)];
+      if (!med || med <= 0) return null;
+      const raw = 1 / med;
+      const known = [23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60];
+      for (const k of known) if (Math.abs(raw - k) / k < 0.06) return k;
+      return Math.round(raw * 100) / 100;
+    };
+    const cb = (now, meta) => {
+      if (last != null) {
+        const d = meta.mediaTime - last;
+        if (d > 1e-4) deltas.push(d);
+      }
+      last = meta.mediaTime;
+      if (deltas.length >= 10) finish(compute());
+      else if (!settled) vid.requestVideoFrameCallback(cb);
+    };
+    vid.play().then(() => vid.requestVideoFrameCallback(cb)).catch(() => finish(null));
+    setTimeout(() => finish(deltas.length >= 4 ? compute() : null), 1600);
+  });
+}
+
+/* ---------------- video load ---------------- */
+$('loadBtn').onclick = () => $('fileIn').click();
+$('fileIn').onchange = async e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  status('Loading ' + file.name + '…');
+  const url = URL.createObjectURL(file);
+  vid.src = url;
+  await new Promise((res, rej) => {
+    vid.onloadedmetadata = res;
+    vid.onerror = () => rej(new Error('could not decode this video'));
+  }).catch(err => { status(err.message, true); });
+  state.vw = vid.videoWidth; state.vh = vid.videoHeight;
+  state.duration = vid.duration;
+  if (!state.vw) { status('Could not read video dimensions.', true); return; }
+  A = state.vw / state.vh;
+  orthoCam.left = -A / 2; orthoCam.right = A / 2; orthoCam.updateProjectionMatrix();
+  perspCam.aspect = A; perspCam.updateProjectionMatrix();
+  $('srcWrap').style.aspectRatio = `${state.vw}/${state.vh}`;
+  $('compWrap').style.aspectRatio = `${state.vw}/${state.vh}`;
+  const capH = 0.56 * innerHeight;
+  for (const id of ['srcWrap', 'compWrap']) {
+    $(id).style.maxWidth = `min(100%, calc(56vh * ${A.toFixed(4)}))`;
+  }
+  $('srcHint').style.display = 'none';
+  state.depth = { frames: [], w: 0, h: 0, gmin: 0, gmax: 1, bakedCount: 0, backend: state.depth.backend };
+  $('bakeInfo').textContent = 'not baked';
+  $('bakeBar').style.width = '0%';
+  state.tracked = false; state.raw = []; state.frames = [];
+  invalidateCaches();
+  status('Estimating frame rate…');
+  const est = await estimateFps();
+  if (est) {
+    state.fps = est;
+    const sel = $('fpsSel');
+    if (![...sel.options].some(o => +o.value === est)) {
+      const o = document.createElement('option');
+      o.textContent = est;
+      sel.appendChild(o);
+    }
+    sel.value = String(est);
+  } else {
+    state.fps = +$('fpsSel').value;
+  }
+  await seekTo(0.0001);
+  state.frameCount = Math.max(1, Math.round(state.duration * state.fps));
+  $('srcMeta').textContent = `${file.name} · ${state.vw}×${state.vh} · ${fmtTime(state.duration)} · ${state.fps} fps`;
+  await trackMotion();
+};
+
+$('fpsSel').onchange = () => {
+  state.fps = +$('fpsSel').value;
+  state.frameCount = Math.max(1, Math.round(state.duration * state.fps));
+  if (state.vw) status('Frame rate changed — re-track motion for accurate frames.');
+};
+
+/* ---------------- transport ---------------- */
+function syncPlayBtn() { $('playBtn').textContent = vid.paused ? 'Play' : 'Pause'; }
+$('playBtn').onclick = () => { vid.paused ? vid.play() : vid.pause(); syncPlayBtn(); };
+vid.addEventListener('ended', syncPlayBtn);
+vid.addEventListener('pause', syncPlayBtn);
+vid.addEventListener('play', syncPlayBtn);
+document.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !['SELECT', 'INPUT', 'BUTTON'].includes(document.activeElement?.tagName) && state.vw && !state.busy) {
+    e.preventDefault();
+    $('playBtn').click();
+  }
+});
+let scrubbing = false;
+function timelineSeek(e) {
+  const r = timeline.getBoundingClientRect();
+  const frac = clamp((e.clientX - r.left) / r.width, 0, 1);
+  vid.currentTime = frac * state.duration;
+}
+timeline.addEventListener('pointerdown', e => {
+  if (!state.vw || state.busy) return;
+  scrubbing = true;
+  vid.pause(); syncPlayBtn();
+  timeline.setPointerCapture(e.pointerId);
+  timelineSeek(e);
+});
+timeline.addEventListener('pointermove', e => { if (scrubbing) timelineSeek(e); });
+timeline.addEventListener('pointerup', () => { scrubbing = false; });
+
+/* ---------------- controls wiring ---------------- */
+const wire = (id, fn) => $(id).addEventListener('input', fn);
+wire('skelOn', e => state.layers.skel.on = e.target.checked);
+wire('skelOp', e => state.layers.skel.opacity = +e.target.value);
+wire('skelStyle', e => state.layers.skel.style = e.target.value);
+wire('boneW', e => state.layers.skel.bone = +e.target.value);
+wire('jointW', e => state.layers.skel.joint = +e.target.value);
+wire('silOn', e => state.layers.sil.on = e.target.checked);
+wire('silOp', e => state.layers.sil.opacity = +e.target.value);
+wire('depthOn', e => state.layers.depth.on = e.target.checked);
+wire('depthOp', e => state.layers.depth.opacity = +e.target.value);
+wire('conf', e => state.conf = +e.target.value);
+let smoothTimer = null;
+wire('smooth', e => {
+  state.smoothing = +e.target.value;
+  clearTimeout(smoothTimer);
+  smoothTimer = setTimeout(applySmoothing, 120);
+});
+$('retrackBtn').onclick = trackMotion;
+
+function setCamMode(mode) {
+  state.camMode = mode;
+  controls.enabled = mode === 'free';
+  $('camMatch').classList.toggle('on', mode === 'match');
+  $('camFree').classList.toggle('on', mode === 'free');
+  $('camHint').textContent = mode === 'free'
+    ? 'free orbit: drag to orbit, wheel to zoom — exports use this view'
+    : 'match source: framing locked to the original camera';
+}
+$('camMatch').onclick = () => setCamMode('match');
+$('camFree').onclick = () => setCamMode('free');
+$('camReset').onclick = () => {
+  perspCam.position.set(0, 0, 1.6);
+  controls.target.set(0, 0, 0);
+  controls.update();
+};
+
+const PRESETS = {
+  stick:    { skel: [true, 1, 'white'], sil: [false, 0.45], depth: [false, 1] },
+  openpose: { skel: [true, 1, 'openpose'], sil: [false, 0.45], depth: [false, 1] },
+  tweet:    { skel: [true, 1, 'openpose'], sil: [true, 0.35], depth: [true, 1] },
+  sil:      { skel: [false, 1, 'white'], sil: [true, 1], depth: [false, 1] },
+  depth:    { skel: [false, 1, 'openpose'], sil: [false, 0.45], depth: [true, 1] },
+};
+document.querySelectorAll('[data-preset]').forEach(btn => {
+  btn.onclick = () => {
+    const p = PRESETS[btn.dataset.preset];
+    state.layers.skel.on = p.skel[0]; state.layers.skel.opacity = p.skel[1]; state.layers.skel.style = p.skel[2];
+    state.layers.sil.on = p.sil[0]; state.layers.sil.opacity = p.sil[1];
+    state.layers.depth.on = p.depth[0]; state.layers.depth.opacity = p.depth[1];
+    $('skelOn').checked = p.skel[0]; $('skelOp').value = p.skel[1]; $('skelStyle').value = p.skel[2];
+    $('silOn').checked = p.sil[0]; $('silOp').value = p.sil[1];
+    $('depthOn').checked = p.depth[0]; $('depthOp').value = p.depth[1];
+    if (p.depth[0] && !state.depth.bakedCount) status('Depth layer is on but not baked yet — hit "Bake depth".');
+  };
+});
+</script>
+</body>
+</html>

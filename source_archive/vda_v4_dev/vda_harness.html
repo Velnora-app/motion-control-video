@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>VDA-Small browser harness (Phase 2)</title>
+<style>
+  body { font: 13px/1.5 ui-monospace, monospace; background: #14161a; color: #cfd6e4; margin: 20px; }
+  h1 { font-size: 16px; color: #7ecfff; }
+  #status { font-size: 15px; color: #ffd479; margin: 8px 0; }
+  #log { white-space: pre-wrap; background: #0d0f12; border: 1px solid #2a2f3a; padding: 10px; max-height: 60vh; overflow-y: auto; }
+  button { background: #2a3f5f; color: #dfe8ff; border: 1px solid #44608f; padding: 6px 14px; margin-right: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>VDA-Small · onnxruntime-web WebGPU harness</h1>
+<div id="status">idle</div>
+<div>
+  <button onclick="__vda.run()">run full pipeline</button>
+  <button onclick="__vda.run({ep:'wasm'})">run (wasm EP)</button>
+</div>
+<div id="log"></div>
+<script>
+'use strict';
+
+// ---- constants: mirror video_depth.py exactly ----
+const INFER_LEN = 32, OVERLAP = 10, INTERP_LEN = 8;
+const KEYFRAMES = [0, 12, 24, 25, 26, 27, 28, 29, 30, 31];
+const FRAME_STEP = INFER_LEN - OVERLAP;                    // 22
+const NET_H = 518, NET_W = 910, N_PATCH = (NET_H / 14) * (NET_W / 14); // 37*65=2405
+const EMBED = 384;
+const MEAN = [0.485, 0.456, 0.406], STD = [0.229, 0.224, 0.225];
+const CLIP_URL = '/tp_test_2char.mp4';
+const ENC_URL = '/vda_v4/onnx_out/vda_vits_encoder_518x910.onnx';
+const HEAD_URL = '/vda_v4/onnx_out/vda_vits_head_T32_37x65.onnx';
+const ORT_CANDIDATES = [
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.0/dist/',
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.1/dist/',
+  'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/',
+];
+
+const $ = id => document.getElementById(id);
+const __vda = window.__vda = {
+  state: 'idle', progress: '', error: null, stats: null, epLog: [],
+  aligned: null, run: null, ortBase: null,
+};
+
+function log(msg) {
+  const line = `[${(performance.now() / 1000).toFixed(1)}s] ${msg}`;
+  console.log('[vda]', msg);
+  $('log').textContent += line + '\n';
+  $('log').scrollTop = 1e9;
+}
+function setState(s, p) {
+  __vda.state = s; __vda.progress = p || '';
+  $('status').textContent = `${s}${p ? ' — ' + p : ''}`;
+}
+
+// ---- ort loader with version fallback ----
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const el = document.createElement('script');
+    el.src = src; el.onload = () => res(); el.onerror = () => rej(new Error('404 ' + src));
+    document.head.appendChild(el);
+  });
+}
+async function loadOrt() {
+  for (const base of ORT_CANDIDATES) {
+    try {
+      await loadScript(base + 'ort.webgpu.min.js');
+      __vda.ortBase = base;
+      ort.env.wasm.wasmPaths = base;
+      log(`ort-web loaded from ${base} (version ${ort.env.versions?.web || '?'})`);
+      return;
+    } catch (e) { log(`ort load failed: ${e.message}`); }
+  }
+  throw new Error('all ort-web CDN candidates failed');
+}
+
+// ---- console capture during session creation (EP assignment forensics) ----
+function captureConsole(on) {
+  if (on) {
+    for (const k of ['log', 'debug', 'info', 'warn', 'error']) {
+      const orig = console[k];
+      console['__' + k] = orig;
+      console[k] = (...a) => {
+        try {
+          const s = a.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join(' ');
+          if (__vda.epLog.length < 20000) __vda.epLog.push(s);
+        } catch (e) {}
+        orig.apply(console, a);
+      };
+    }
+  } else {
+    for (const k of ['log', 'debug', 'info', 'warn', 'error']) {
+      if (console['__' + k]) { console[k] = console['__' + k]; delete console['__' + k]; }
+    }
+  }
+}
+
+// ---- frame grab: seek-step through the clip, normalize to CHW float32 ----
+async function grabFrames(url, fps) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('clip fetch ' + resp.status);
+  const blob = await resp.blob();
+  const v = document.createElement('video');
+  v.muted = true; v.preload = 'auto';
+  v.src = URL.createObjectURL(blob);
+  await new Promise((res, rej) => {
+    v.addEventListener('loadedmetadata', res, { once: true });
+    v.addEventListener('error', () => rej(new Error('video decode error')), { once: true });
+  });
+  const F = Math.round(v.duration * fps);
+  log(`clip: duration ${v.duration.toFixed(3)}s, videoWidth ${v.videoWidth} -> ${F} frames @ ${fps}fps`);
+  const cv = document.createElement('canvas');
+  cv.width = NET_W; cv.height = NET_H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  const frames = [];
+  for (let i = 0; i < F; i++) {
+    v.currentTime = (i + 0.5) / fps;
+    await new Promise(res => v.addEventListener('seeked', res, { once: true }));
+    ctx.drawImage(v, 0, 0, NET_W, NET_H);
+    const im = ctx.getImageData(0, 0, NET_W, NET_H).data;
+    const out = new Float32Array(3 * NET_H * NET_W);
+    for (let c = 0; c < 3; c++) {
+      const off = c * NET_H * NET_W, m = MEAN[c], s = STD[c];
+      for (let p = 0; p < NET_H * NET_W; p++) out[off + p] = (im[p * 4 + c] / 255 - m) / s;
+    }
+    frames.push(out);
+    if (i % 12 === 0) setState('decoding', `${i + 1}/${F}`);
+  }
+  URL.revokeObjectURL(v.src);
+  return frames;
+}
+
+// ---- stitching helpers: 1:1 ports from utils/util.py ----
+function computeScaleShift(preds, targets) { // arrays of Float32Array, mask == 1
+  let a00 = 0, a01 = 0, a11 = 0, b0 = 0, b1 = 0;
+  for (let k = 0; k < preds.length; k++) {
+    const p = preds[k], t = targets[k];
+    for (let i = 0; i < p.length; i++) {
+      a00 += p[i] * p[i]; a01 += p[i]; b0 += p[i] * t[i]; b1 += t[i];
+    }
+    a11 += p.length;
+  }
+  const det = a00 * a11 - a01 * a01;
+  if (det === 0) return { scale: 1, shift: 0 };
+  return { scale: (a11 * b0 - a01 * b1) / det, shift: (-a01 * b0 + a00 * b1) / det };
+}
+function scaleClamp(d, scale, shift) {
+  const o = new Float32Array(d.length);
+  for (let i = 0; i < d.length; i++) { const v = d[i] * scale + shift; o[i] = v < 0 ? 0 : v; }
+  return o;
+}
+function crossfade(preList, postList) { // get_interpolate_frames
+  const n = preList.length, step = 1 / (n - 1), out = [];
+  for (let i = 0; i < n; i++) {
+    const w = i === 0 ? 0 : (i === n - 1 ? 1 : i * step);
+    const a = preList[i], b = postList[i], o = new Float32Array(a.length);
+    for (let p = 0; p < a.length; p++) o[p] = a[p] * (1 - w) + b[p] * w;
+    out.push(o);
+  }
+  return out;
+}
+
+// ---- main pipeline ----
+async function run(opts = {}) {
+  if (__vda.state !== 'idle' && __vda.state !== 'done' && __vda.state !== 'error') { log('already running'); return; }
+  __vda.error = null; __vda.stats = null; __vda.aligned = null;
+  const ep = opts.ep || 'webgpu';
+  const suffix = opts.models === 'fp16' ? '_fp16' : '';
+  const encUrl = ENC_URL.replace('.onnx', suffix + '.onnx');
+  const headUrl = HEAD_URL.replace('.onnx', suffix + '.onnx');
+  const tag = `${ep}${suffix}${opts.maxFrames ? '_cap' + opts.maxFrames : ''}`;
+  const t00 = performance.now();
+  try {
+    setState('loading-ort');
+    if (!window.ort) await loadOrt();
+    ort.env.logLevel = 'verbose';
+
+    const adapter = navigator.gpu ? await navigator.gpu.requestAdapter() : null;
+    log(`webgpu adapter: ${adapter ? (adapter.info?.vendor || 'present') + ' / ' + (adapter.info?.architecture || '?') : 'NONE'}`);
+
+    setState('creating-sessions', tag);
+    captureConsole(true);
+    let tEncCreate = performance.now();
+    const enc = await ort.InferenceSession.create(encUrl, { executionProviders: [ep], graphOptimizationLevel: 'all' });
+    tEncCreate = performance.now() - tEncCreate;
+    let tHeadCreate = performance.now();
+    const head = await ort.InferenceSession.create(headUrl, { executionProviders: [ep], graphOptimizationLevel: 'all' });
+    tHeadCreate = performance.now() - tHeadCreate;
+    captureConsole(false);
+    ort.env.logLevel = 'warning';
+    const fallbackLines = __vda.epLog.filter(l => /assigned to (CPU|cpu)|\bfall ?back\b|CPUExecutionProvider/i.test(l));
+    log(`sessions created: enc ${(tEncCreate / 1000).toFixed(1)}s, head ${(tHeadCreate / 1000).toFixed(1)}s; epLog ${__vda.epLog.length} lines, ${fallbackLines.length} fallback-ish`);
+
+    setState('decoding');
+    const fps = 24;
+    let frames = await grabFrames(CLIP_URL, fps);
+    if (opts.maxFrames) frames = frames.slice(0, opts.maxFrames);
+    const F = frames.length;
+
+    // window bookkeeping — mirrors infer_video_depth padding + KEYFRAMES slot copies
+    const winStarts = [];
+    for (let fid = 0; fid < F; fid += FRAME_STEP) winStarts.push(fid);
+    const srcIdxPerWin = [];
+    let prevSrc = null;
+    for (let w = 0; w < winStarts.length; w++) {
+      const src = new Array(INFER_LEN);
+      for (let i = 0; i < INFER_LEN; i++) src[i] = Math.min(winStarts[w] + i, F - 1); // padding == copies of last frame
+      if (prevSrc) for (let i = 0; i < OVERLAP; i++) src[i] = prevSrc[KEYFRAMES[i]];
+      srcIdxPerWin.push(src); prevSrc = src;
+    }
+    log(`windows: ${winStarts.length} (starts ${winStarts.join(',')})`);
+
+    // feature cache + preallocated head input buffers
+    const featCache = new Map(); // srcIdx -> [4 x Float32Array(N_PATCH*EMBED)]
+    const headBufs = [0, 1, 2, 3].map(() => new Float32Array(INFER_LEN * N_PATCH * EMBED));
+    const perFrameEnc = [], perWinHead = [], perWinFill = [];
+    let encRuns = 0;
+
+    const aligned = []; let refAlign = [];
+    const alignLen = OVERLAP - INTERP_LEN; // 2
+
+    for (let w = 0; w < winStarts.length; w++) {
+      const src = srcIdxPerWin[w];
+      setState('inference', `window ${w + 1}/${winStarts.length}`);
+      // encode any slot's source frame not yet cached
+      for (const s of src) {
+        if (featCache.has(s)) continue;
+        const t0 = performance.now();
+        const out = await enc.run({ pixels: new ort.Tensor('float32', frames[s], [1, 3, NET_H, NET_W]) });
+        perFrameEnc.push(performance.now() - t0); encRuns++;
+        featCache.set(s, [out.feat1.data, out.feat2.data, out.feat3.data, out.feat4.data]);
+      }
+      // fill stacked buffers
+      let t0 = performance.now();
+      for (let i = 0; i < INFER_LEN; i++) {
+        const fs = featCache.get(src[i]);
+        for (let j = 0; j < 4; j++) headBufs[j].set(fs[j], i * N_PATCH * EMBED);
+      }
+      perWinFill.push(performance.now() - t0);
+      // head
+      t0 = performance.now();
+      const feeds = {};
+      for (let j = 0; j < 4; j++) feeds['feat' + (j + 1)] = new ort.Tensor('float32', headBufs[j], [INFER_LEN, N_PATCH, EMBED]);
+      const depthOut = (await head.run(feeds)).depth.data; // [32,1,518,910]
+      perWinHead.push(performance.now() - t0);
+      // slice window depths
+      const win = [];
+      for (let i = 0; i < INFER_LEN; i++) win.push(depthOut.slice(i * NET_H * NET_W, (i + 1) * NET_H * NET_W));
+      // stitch (1:1 with infer_video_depth alignment loop, streamed per window)
+      if (w === 0) {
+        for (const d of win) aligned.push(d);
+        refAlign = [win[0], win[KEYFRAMES[1]]];
+      } else {
+        const { scale, shift } = computeScaleShift([win[0], win[1]], refAlign);
+        log(`window ${w + 1}: scale ${scale.toFixed(4)} shift ${shift.toFixed(4)}`);
+        const pre = aligned.slice(-INTERP_LEN);
+        const post = [];
+        for (let i = alignLen; i < OVERLAP; i++) post.push(scaleClamp(win[i], scale, shift));
+        const faded = crossfade(pre, post);
+        aligned.splice(-INTERP_LEN, INTERP_LEN, ...faded);
+        for (let i = OVERLAP; i < INFER_LEN; i++) aligned.push(scaleClamp(win[i], scale, shift));
+        refAlign = [refAlign[0], scaleClamp(win[KEYFRAMES[1]], scale, shift)];
+      }
+      // evict cache entries not needed by the next window
+      if (w + 1 < winStarts.length) {
+        const keep = new Set(srcIdxPerWin[w + 1]);
+        for (const k of [...featCache.keys()]) if (!keep.has(k)) featCache.delete(k);
+      }
+    }
+    const alignedTrim = aligned.slice(0, F);
+    __vda.aligned = alignedTrim;
+
+    const sum = a => a.reduce((x, y) => x + y, 0);
+    const stats = {
+      tag, models: opts.models || 'fp32',
+      ep, ortBase: __vda.ortBase, ortVersion: (window.ort && ort.env.versions?.web) || null,
+      adapter: adapter ? { vendor: adapter.info?.vendor, architecture: adapter.info?.architecture } : null,
+      frames: F, windows: winStarts.length, encRuns,
+      sessionCreateMs: { enc: tEncCreate, head: tHeadCreate },
+      encFirstMs: perFrameEnc[0], encMeanMsAfterFirst: sum(perFrameEnc.slice(1)) / (perFrameEnc.length - 1),
+      headPerWindowMs: perWinHead, fillPerWindowMs: perWinFill,
+      totalMs: performance.now() - t00,
+      jsHeapMB: performance.memory ? +(performance.memory.usedJSHeapSize / 1048576).toFixed(0) : null,
+      fallbackishLogLines: fallbackLines.slice(0, 200),
+      fallbackishCount: fallbackLines.length,
+    };
+    __vda.stats = stats;
+    log(`DONE in ${(stats.totalMs / 1000).toFixed(1)}s — enc first ${stats.encFirstMs.toFixed(0)}ms, mean ${stats.encMeanMsAfterFirst.toFixed(0)}ms; head windows [${perWinHead.map(x => x.toFixed(0)).join(', ')}]ms; JS heap ${stats.jsHeapMB}MB`);
+
+    setState('uploading');
+    for (const idx of [0, Math.floor(F / 2), F - 1]) {
+      await fetch(`/upload/vda_browser_${tag}_f${String(idx).padStart(3, '0')}.bin`, { method: 'PUT', body: alignedTrim[idx].buffer.slice(alignedTrim[idx].byteOffset, alignedTrim[idx].byteOffset + alignedTrim[idx].byteLength) });
+    }
+    await fetch(`/upload/vda_browser_${tag}_stats.json`, { method: 'PUT', body: JSON.stringify(stats, null, 2) });
+    log('uploaded 3 depth frames + stats');
+    if (opts.uploadInputs) {
+      setState('uploading-inputs');
+      for (let i = 0; i < F; i++) {
+        const f = frames[i], u8 = new Uint8Array(3 * NET_H * NET_W);
+        for (let c = 0; c < 3; c++) {
+          const off = c * NET_H * NET_W;
+          for (let p = 0; p < NET_H * NET_W; p++) u8[off + p] = Math.max(0, Math.min(255, Math.round((f[off + p] * STD[c] + MEAN[c]) * 255)));
+        }
+        await fetch(`/upload/vda_runinput_f${String(i).padStart(3, '0')}.bin`, { method: 'PUT', body: u8.buffer });
+      }
+      log('uploaded run input frames');
+    }
+    setState('done');
+  } catch (e) {
+    __vda.error = String(e && e.stack || e);
+    log('ERROR: ' + __vda.error);
+    setState('error', String(e));
+  }
+}
+__vda.run = run;
+
+// debug: grab N input frames (denormalized RGB u8) and PUT them for python comparison
+__vda.debugGrabInputs = async function (indices) {
+  const frames = await grabFrames(CLIP_URL, 24);
+  for (const i of indices) {
+    const f = frames[i], u8 = new Uint8Array(3 * NET_H * NET_W);
+    for (let c = 0; c < 3; c++) {
+      const off = c * NET_H * NET_W;
+      for (let p = 0; p < NET_H * NET_W; p++) u8[off + p] = Math.max(0, Math.min(255, Math.round((f[off + p] * STD[c] + MEAN[c]) * 255)));
+    }
+    await fetch(`/upload/vda_input_f${String(i).padStart(3, '0')}.bin`, { method: 'PUT', body: u8.buffer });
+  }
+  log(`debug inputs uploaded: ${indices.join(',')}`);
+  return 'ok';
+};
+log('harness ready — call __vda.run() or click the button');
+</script>
+</body>
+</html>
